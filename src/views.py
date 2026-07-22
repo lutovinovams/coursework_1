@@ -1,11 +1,14 @@
-import os
+﻿import os
 import json
 import logging
 from datetime import datetime
 import pandas as pd
 import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+is_debug = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
+log_level = logging.DEBUG if is_debug else logging.INFO
+
+logging.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 SETTINGS_FILE = "user_settings.json"
@@ -16,113 +19,82 @@ def load_user_settings() -> tuple[list, list]:
     if not os.path.exists(SETTINGS_FILE):
         logger.warning(f"Файл настроек {SETTINGS_FILE} не найден. Используются значения по умолчанию.")
         return ["USD", "EUR"], ["AAPL", "AMZN", "GOOGL", "MSFT", "TSLA"]
+
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             settings = json.load(f)
-        return settings.get("user_currencies", []), settings.get("user_stocks", [])
+            return settings.get("user_currencies", []), settings.get("user_stocks", [])
     except Exception as e:
         logger.error(f"Ошибка при чтении {SETTINGS_FILE}: {e}")
         return [], []
 
 
-def get_currency_rates(currencies: list, target_date: datetime) -> dict:
-    """Получает курс валют по отношению к рублю (RUB) на выбранную дату через API ЦБ РФ (cbr-xml-daily)."""
+def fetch_currency_rates(currencies: list) -> list[dict]:
+    """Получает курс валют по отношению к рублю через API cbr-xml-daily."""
     if not currencies:
-        return {}
+        return []
 
-    now = datetime.now()
-    if target_date.date() == now.date():
-        url = "https://cbr-xml-daily.ru"
-    else:
-        date_path = target_date.strftime("%Y/%m/%d")
-        url = "https://cbr-xml-daily.ru" + date_path + "/daily_json.js"
+    url = "https://www.cbr-xml-daily.ru/daily_json.js"
+    logger.info(f"Запрос курсов валют ЦБ РФ по URL: {url}")
+    result = []
 
     try:
-        logger.info(f"Запрос курсов валют ЦБ РФ по URL: {url}")
         response = requests.get(url, timeout=5)
-
-        if response.status_code == 404:
-            logger.warning(f"Архивный курс на дату {target_date.strftime('%d.%m.%Y')} не найден, берем текущий.")
-            url = "https://cbr-xml-daily.ru"
-            response = requests.get(url, timeout=5)
-
         response.raise_for_status()
         data = response.json()
         valute_data = data.get("Valute", {})
 
-        result = {}
         for currency in currencies:
             info = valute_data.get(currency)
             if info:
                 value = info.get("Value")
                 nominal = info.get("Nominal", 1)
                 if value and nominal:
-                    result[currency] = round(value / nominal, 2)
+                    result.append({"currency": currency, "rate": round(value / nominal, 2)})
                 else:
-                    result[currency] = None
+                    result.append({"currency": currency, "rate": None})
             else:
-                result[currency] = None
+                result.append({"currency": currency, "rate": None})
         return result
     except Exception as e:
         logger.error(f"Ошибка при получении курсов валют через ЦБ РФ API: {e}")
-        return {currency: None for currency in currencies}
+        return [{"currency": c, "rate": None} for c in currencies]
 
 
-def get_stock_prices(stocks: list, target_date: datetime) -> dict:
-    """Получает историческую стоимость закрытия акций на выбранную дату через MOEX ISS API."""
+def fetch_stock_prices(stocks: list) -> list[dict]:
+    """Получает текущую стоимость закрытия акций через MOEX ISS API."""
     if not stocks:
-        return {}
+        return []
 
-    date_str = target_date.strftime("%Y-%m-%d")
-    result = {}
-
+    result = []
     for stock in stocks:
-        url = "https://moex.com" + stock + ".json"
+        url = f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{stock}.json"
+        logger.info(f"Запрос цены акции {stock} на бирже MOEX по URL: {url}")
+
         try:
-            logger.info(f"Запрос цены акции {stock} на бирже MOEX за дату: {date_str}")
-            response = requests.get(url, params={"date": date_str}, timeout=5)
+            response = requests.get(url, timeout=5)
             response.raise_for_status()
             data = response.json()
 
-            history_data = data.get("history", {})
-            columns = history_data.get("columns", [])
-            rows = history_data.get("data", [])
+            securities = data.get("securities", {})
+            sec_columns = securities.get("columns", [])
+            sec_data = securities.get("data", [])
 
-            if not rows:
-                fallback_url = (
-                    "https://moex.com" + stock + ".json"
-                )
-                fallback_resp = requests.get(fallback_url, timeout=5)
-                if fallback_resp.status_code == 200:
-                    fb_data = fallback_resp.json()
-                    securities = fb_data.get("securities", {})
-                    sec_data = securities.get("data", [])
-                    sec_columns = securities.get("columns", [])
-                    if sec_data and "PREVPRICE" in sec_columns:
-                        idx = sec_columns.index("PREVPRICE")
-                        result[stock] = sec_data[idx]
-                        continue
-                result[stock] = None
-                continue
+            price = None
+            if sec_data and "PREVPRICE" in sec_columns:
+                idx = sec_columns.index("PREVPRICE")
+                # Извлекаем цену последней доступной сделки из первой строки ответа
+                if len(sec_data) > 0 and len(sec_data[0]) > idx:
+                    price = sec_data[0][idx]
 
-            df_moex = pd.DataFrame(rows, columns=columns)
-
-            if (
-                "LEGALCLOSEPRICE" in df_moex.columns
-                and not df_moex["LEGALCLOSEPRICE"].empty
-                and pd.notna(df_moex["LEGALCLOSEPRICE"].iloc)
-            ):
-                price = df_moex["LEGALCLOSEPRICE"].iloc
-            elif "CLOSE" in df_moex.columns and not df_moex["CLOSE"].empty and pd.notna(df_moex["CLOSE"].iloc):
-                price = df_moex["CLOSE"].iloc
+            if price is not None:
+                result.append({"stock": stock, "price": float(price)})
             else:
-                price = None
-
-            result[stock] = float(price) if price is not None else None
+                result.append({"stock": stock, "price": None})
 
         except Exception as e:
             logger.error(f"Ошибка при получении цены акции {stock} через MOEX API: {e}")
-            result[stock] = None
+            result.append({"stock": stock, "price": None})
 
     return result
 
@@ -131,22 +103,20 @@ def process_financial_data(df: pd.DataFrame, start_date: datetime, end_date: dat
     """Фильтрует транзакции в заданном диапазоне дат и формирует финансовую агрегацию."""
     if df.empty:
         return {
-            "Расходы": {"Общая сумма": 0, "Основные": {}, "Переводы и наличные": {}},
-            "Поступления": {"Общая сумма": 0, "Основные": {}},
+            "expenses": {"total_amount": 0, "main": [], "transfers_and_cash": []},
+            "income": {"total_amount": 0, "main": []}
         }
 
     working_df = df.copy()
-
     if working_df["Сумма операции"].dtype == object:
         working_df["Сумма операции"] = (
             working_df["Сумма операции"].astype(str).str.replace(",", ".").str.replace(" ", "")
         )
     working_df["Сумма операции"] = pd.to_numeric(working_df["Сумма операции"], errors="coerce").fillna(0)
-
     working_df["Дата операции"] = pd.to_datetime(working_df["Дата операции"], dayfirst=True)
 
     mask = (working_df["Дата операции"] >= start_date) & (
-        working_df["Дата операции"] <= end_date.replace(hour=23, minute=59, second=59)
+            working_df["Дата операции"] <= end_date.replace(hour=23, minute=59, second=59)
     )
     filtered_df = working_df[mask].copy()
 
@@ -155,55 +125,57 @@ def process_financial_data(df: pd.DataFrame, start_date: datetime, end_date: dat
     income_df = filtered_df[filtered_df["Сумма операции"] > 0]
 
     total_expenses = int(round(expenses_df["Сумма операции"].sum()))
-
     cash_transfer_cats = ["Наличные", "Переводы"]
+
     cash_df = expenses_df[expenses_df["Категория"].isin(cash_transfer_cats)]
-    cash_summary = (
-        cash_df.groupby("Категория")["Сумма операции"]
-        .sum()
-        .round()
-        .astype(int)
-        .sort_values(ascending=False)
-        .to_dict()
-    )
+    cash_grouped = cash_df.groupby("Категория")["Сумма операции"].sum().reset_index()
+    cash_grouped = cash_grouped.sort_values(by="Сумма операции", ascending=False)
+    cash_grouped["amount"] = cash_grouped["Сумма операции"].round().astype(int)
+    cash_grouped = cash_grouped.rename(columns={"Категория": "category"})
+    cash_summary = cash_grouped[["category", "amount"]].to_dict(orient="records")
 
     main_exp_df = expenses_df[~expenses_df["Категория"].isin(cash_transfer_cats)]
     main_grouped = main_exp_df.groupby("Категория")["Сумма операции"].sum().sort_values(ascending=False)
 
-    if len(main_grouped) > 7:
-        top_7 = main_grouped.iloc[:7]
-        others_sum = main_grouped.iloc[7:].sum()
-        main_summary = top_7.round().astype(int).to_dict()
-        main_summary["Остальное"] = int(round(others_sum))
-    else:
-        main_summary = main_grouped.round().astype(int).to_dict()
+    main_summary = []
+    if not main_grouped.empty:
+        if len(main_grouped) > 7:
+            top_7 = main_grouped.iloc[:7].reset_index()
+            others_sum = main_grouped.iloc[7:].sum()
+
+            for _, row in top_7.iterrows():
+                main_summary.append({"category": row["Категория"], "amount": int(round(row["Сумма операции"]))})
+            main_summary.append({"category": "Остальное", "amount": int(round(others_sum))})
+        else:
+            for cat, val in main_grouped.items():
+                main_summary.append({"category": cat, "amount": int(round(val))})
 
     total_income = int(round(income_df["Сумма операции"].sum()))
-    income_summary = (
-        income_df.groupby("Категория")["Сумма операции"]
-        .sum()
-        .round()
-        .astype(int)
-        .sort_values(ascending=False)
-        .to_dict()
-    )
+    income_grouped = income_df.groupby("Категория")["Сумма операции"].sum().reset_index()
+    income_grouped = income_grouped.sort_values(by="Сумма операции", ascending=False)
+    income_grouped["amount"] = income_grouped["Сумма операции"].round().astype(int)
+    income_grouped = income_grouped.rename(columns={"Категория": "category"})
+    income_summary = income_grouped[["category", "amount"]].to_dict(orient="records")
 
     return {
-        "Расходы": {
-            "Общая сумма": total_expenses,
-            "Основные": main_summary,
-            "Переводы и наличные": cash_summary,
+        "expenses": {
+            "total_amount": total_expenses,
+            "main": main_summary,
+            "transfers_and_cash": cash_summary
         },
-        "Поступления": {"Общая сумма": total_income, "Основные": income_summary},
+        "income": {
+            "total_amount": total_income,
+            "main": income_summary
+        }
     }
 
 
 def get_events_page_data(df: pd.DataFrame, date_str: str) -> str:
     """Главная функция страницы 'События'. Формирует итоговый JSON-ответ."""
     logger.info(f"Запрос страницы 'События' для даты: {date_str}")
-
     formats = ["%d.%m.%Y", "%Y-%m-%d"]
     target_date = None
+
     for fmt in formats:
         try:
             target_date = datetime.strptime(date_str, fmt)
@@ -218,17 +190,16 @@ def get_events_page_data(df: pd.DataFrame, date_str: str) -> str:
     end_date = target_date
 
     user_currencies, user_stocks = load_user_settings()
-
     financial_data = process_financial_data(df, start_date, end_date)
 
-    currency_rates = get_currency_rates(user_currencies, target_date)
-    stock_prices = get_stock_prices(user_stocks, target_date)
+    currency_rates = fetch_currency_rates(user_currencies)
+    stock_prices = fetch_stock_prices(user_stocks)
 
     result = {
-        "Расходы": financial_data["Расходы"],
-        "Поступления": financial_data["Поступления"],
-        "Курс валют": currency_rates,
-        "Стоимость акций": stock_prices,
+        "expenses": financial_data["expenses"],
+        "income": financial_data["income"],
+        "currency_rates": currency_rates,
+        "stock_prices": stock_prices,
     }
     return json.dumps(result, ensure_ascii=False, indent=4)
 
@@ -244,12 +215,10 @@ if __name__ == "__main__":
         {"Дата операции": "28.12.2021 18:42:21", "Сумма операции": "-257.89", "Категория": "Каршеринг"},
         {"Дата операции": "16.12.2021 16:40:47", "Сумма операции": "-14216.42", "Категория": "ЖКХ"},
     ]
-    df = pd.DataFrame(raw_bank_data)
-
+    df_test = pd.DataFrame(raw_bank_data)
     print("--- Результирующий JSON-ответ для страницы 'События' ---")
-
     try:
-        json_result = get_events_page_data(df, "30.12.2021")
+        json_result = get_events_page_data(df_test, "30.12.2021")
         print(json_result)
     except Exception as error:
         print(f"Критическая ошибка при выполнении скрипта: {error}")
