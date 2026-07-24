@@ -1,9 +1,9 @@
 ﻿import json
 from datetime import datetime, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, List
 import pandas as pd
 
-from services import fetch_currency_rates, fetch_stock_prices, load_user_settings
+from src.services import fetch_currency_rates, fetch_stock_prices, load_user_settings
 
 
 def process_financial_data(
@@ -28,8 +28,7 @@ def process_financial_data(
             .str.replace(" ", "")
         )
     working_df["Сумма операции"] = (
-        pd.to_numeric(working_df["Сумма операции"], errors="coerce")
-        .fillna(0)
+        pd.to_numeric(working_df["Сумма операции"], errors="coerce").fillna(0)
     )
     working_df["Дата операции"] = pd.to_datetime(
         working_df["Дата операции"], dayfirst=True
@@ -84,14 +83,10 @@ def process_financial_data(
     income_grouped = (
         income_df.groupby("Категория")["Сумма операции"].sum().reset_index()
     )
-    income_grouped = income_grouped.sort_values(
-        by="Сумма операции", ascending=False
-    )
+    income_grouped = income_grouped.sort_values(by="Сумма операции", ascending=False)
     income_grouped["amount"] = income_grouped["Сумма операции"].round().astype(int)
     income_grouped = income_grouped.rename(columns={"Категория": "category"})
-    income_summary = income_grouped[["category", "amount"]].to_dict(
-        orient="records"
-    )
+    income_summary = income_grouped[["category", "amount"]].to_dict(orient="records")
 
     return {
         "expenses": {
@@ -104,11 +99,15 @@ def process_financial_data(
 
 
 def get_events_page_data(
-    df: pd.DataFrame, date_str: str, range_type: str = "M"
+    df: pd.DataFrame,
+    date_str: str,
+    currency_rates: List[Dict],
+    stock_prices: List[Dict],
+    range_type: str = "M",
 ) -> str:
     """Главная функция страницы 'События'.
 
-    Расчитывает временные диапазоны и формирует итоговый JSON-ответ.
+    Формирует итоговый JSON-ответ на основе переданных финансовых данных.
     """
     formats = ["%d.%m.%Y", "%Y-%m-%d"]
     target_date = None
@@ -130,18 +129,13 @@ def get_events_page_data(
     elif range_type == "M":
         start_date = target_date.replace(day=1, hour=0, minute=0, second=0)
     elif range_type == "Y":
-        start_date = target_date.replace(
-            month=1, day=1, hour=0, minute=0, second=0
-        )
+        start_date = target_date.replace(month=1, day=1, hour=0, minute=0, second=0)
     elif range_type == "ALL":
         start_date = datetime.min
     else:
         start_date = target_date.replace(day=1, hour=0, minute=0, second=0)
 
-    user_currencies, user_stocks = load_user_settings()
     financial_data = process_financial_data(df, start_date, end_date)
-    currency_rates = fetch_currency_rates(user_currencies)
-    stock_prices = fetch_stock_prices(user_stocks)
 
     result = {
         "expenses": financial_data["expenses"],
