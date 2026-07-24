@@ -2,11 +2,15 @@ import os
 import warnings
 import pandas as pd
 
-from reports import spending_by_category
-from services import investment_bank
-from views import get_events_page_data
+from src.reports import spending_by_category
+from src.services import (
+    fetch_currency_rates,
+    fetch_stock_prices,
+    investment_bank,
+    load_user_settings,
+)
+from src.views import get_events_page_data
 
-# Подавление предупреждений парсинга дат для чистоты вывода
 warnings.filterwarnings("ignore", category=UserWarning)
 
 FILE_PATH = r"C:\Users\Admin\Desktop\project\coursework_1\data\operations.xlsx"
@@ -63,8 +67,19 @@ def main() -> None:
     test_date = "31.12.2021"
     target_month = "2021-12"
 
+    # ИСПРАВЛЕНО: Сбор данных API и передача четырех аргументов в get_events_page_data
     try:
-        json_response = get_events_page_data(df, date_str=test_date, range_type="M")
+        user_currencies, user_stocks = load_user_settings()
+        currency_rates = fetch_currency_rates(user_currencies)
+        stock_prices = fetch_stock_prices(user_stocks)
+
+        json_response = get_events_page_data(
+            df,
+            date_str=test_date,
+            currency_rates=currency_rates,
+            stock_prices=stock_prices,
+            range_type="M",
+        )
         print("\n--- Главная страница (События) ---")
         print(json_response[:1000] + "\n...")
     except Exception as e:
@@ -76,7 +91,9 @@ def main() -> None:
             dict_df["Дата операции"], dayfirst=True, errors="coerce"
         ).dt.strftime("%Y-%m-%d")
 
-        transactions_list = dict_df.dropna(subset=["Дата операции"]).to_dict(orient="records")
+        transactions_list = dict_df.dropna(subset=["Дата операции"]).to_dict(
+            orient="records"
+        )
 
         savings = investment_bank(
             month=target_month, transactions=transactions_list, limit=50
