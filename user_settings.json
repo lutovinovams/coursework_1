@@ -1,4 +1,4 @@
 {
-    "user_currencies": ["USD", "EUR"],
-    "user_stocks": ["SBER", "GAZP", "LKOH"]
+  "user_currencies": ["USD", "EUR"],
+  "user_stocks": ["SBER", "GAZP", "LKOH", "YNDX", "ROSN"]
 }
