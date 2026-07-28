@@ -1,0 +1,92 @@
+import os
+import sys
+import json
+from datetime import datetime
+import pandas as pd
+from unittest.mock import patch, mock_open
+
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from src import views
+from src import services
+
+
+def test_load_user_settings() -> None:
+    """Проверяет корректность парсинга пользовательских настроек из JSON файла."""
+    mock_data = json.dumps({
+        "user_currencies": ["EUR"],
+        "user_stocks": ["SBER"]
+    })
+    with patch("os.path.exists", return_value=True), \
+            patch("builtins.open", mock_open(read_data=mock_data)):
+        currencies, stocks = services.load_user_settings()
+
+    assert currencies == ["EUR"]
+    assert stocks == ["SBER"]
+
+
+def test_process_financial_data_aggregation() -> None:
+    """Проверяет фильтрацию, убывающую сортировку и ограничение ТОП-7 с категорией 'Остальное'."""
+    raw_data = [
+        {
+            "Дата операции": "15.12.2021 12:00:00",
+            "Сумма операции": f"-{i * 100}",
+            "Категория": f"Кат_{i}"
+        }
+        for i in range(1, 10)
+    ]
+    raw_data.extend([
+        {"Дата операции": "20.12.2021 10:00:00", "Сумма операции": "-500", "Категория": "Наличные"},
+        {"Дата операции": "21.12.2021 11:00:00", "Сумма операции": "-1500", "Категория": "Переводы"},
+        {"Дата операции": "25.12.2021 09:00:00", "Сумма операции": "50000", "Категория": "Зарплата"},
+        {"Дата операции": "01.11.2021 12:00:00", "Сумма операции": "-9999", "Категория": "Супермаркеты"}
+    ])
+    df = pd.DataFrame(raw_data)
+    start_date = datetime(2021, 12, 1)
+    end_date = datetime(2021, 12, 31)
+
+    result = views.process_financial_data(df, start_date, end_date)
+
+    assert result["expenses"]["total_amount"] == 6500
+    assert result["income"]["total_amount"] == 50000
+
+    main_cats = result["expenses"]["main"]
+    assert len(main_cats) == 8
+    assert main_cats[-1]["category"] == "Остальное"
+    assert main_cats[-1]["amount"] == 300
+    assert main_cats[0]["category"] == "Кат_9"
+    assert main_cats[0]["amount"] == 900
+
+    transfers = result["expenses"]["transfers_and_cash"]
+    assert transfers[0]["category"] == "Переводы"
+    assert transfers[0]["amount"] == 1500
+
+
+def test_get_events_page_data_output() -> None:
+    """Проверяет финальную структуру и ключи результирующего JSON-отчета."""
+    currency_rates = [{"currency": "USD", "rate": 73.21}]
+    stock_prices = [{"stock": "SBER", "price": 295.5}]
+
+    raw_data = [
+        {"Дата операции": "20.12.2021", "Сумма операции": "-1000", "Категория": "Супермаркеты"}
+    ]
+    df = pd.DataFrame(raw_data)
+
+    json_str = views.get_events_page_data(
+        df,
+        date_str="30.12.2021",
+        currency_rates=currency_rates,
+        stock_prices=stock_prices,
+        range_type="M"
+    )
+    data = json.loads(json_str)
+
+    assert "expenses" in data
+    assert "income" in data
+    assert "currency_rates" in data
+    assert "stock_prices" in data
+    assert data["expenses"]["total_amount"] == 1000
+    assert data["currency_rates"][0]["currency"] == "USD"
+    assert data["stock_prices"][0]["stock"] == "SBER"
